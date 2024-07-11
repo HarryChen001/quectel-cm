@@ -9,7 +9,7 @@
   None.
 
   ---------------------------------------------------------------------------
-  Copyright (c) 2016 - 2020 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
+  Copyright (c) 2016 - 2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
   Quectel Wireless Solution Proprietary and Confidential.
   ---------------------------------------------------------------------------
 ******************************************************************************/
@@ -176,7 +176,7 @@ static int ql_qmi_qmap_mode_detect(PROFILE_T *profile) {
     pl->filename[n] = '\0';
     while (pl->filename[n] != '/')
         n--;
-    strncpy(profile->driver_name, &pl->filename[n+1], sizeof(profile->driver_name));
+    strncpy(profile->driver_name, &pl->filename[n+1], sizeof(profile->driver_name) - 1);
 
     ql_get_driver_rmnet_info(profile, &profile->rmnet_info);
     if (profile->rmnet_info.size) {
@@ -187,7 +187,7 @@ static int ql_qmi_qmap_mode_detect(PROFILE_T *profile) {
             if (profile->qmap_mode == 1)
                 offset_id = 0;
             profile->muxid = profile->rmnet_info.mux_id[offset_id];
-            strncpy(profile->qmapnet_adapter, profile->rmnet_info.ifname[offset_id], sizeof(profile->qmapnet_adapter));
+            strncpy(profile->qmapnet_adapter, profile->rmnet_info.ifname[offset_id], sizeof(profile->qmapnet_adapter) - 1);
             profile->qmap_size = profile->rmnet_info.rx_urb_size;
             profile->qmap_version = profile->rmnet_info.qmap_version;
         }
@@ -249,6 +249,9 @@ static int ql_qmi_qmap_mode_detect(PROFILE_T *profile) {
         n = ql_fread(pl->filename, buf, sizeof(buf));
         if (n >= 5) {
             dbg_time("If use QMAP by /sys/class/net/%s/qmi/add_mux", profile->usbnet_adapter);
+            #if 1
+            dbg_time("Please set mtu of wwan0 >= max dl qmap packet size");
+            #else
             dbg_time("File:%s Line:%d Please make sure add next patch to qmi_wwan.c", __func__, __LINE__);
             /*
             diff --git a/drivers/net/usb/qmi_wwan.c b/drivers/net/usb/qmi_wwan.c
@@ -281,14 +284,15 @@ static int ql_qmi_qmap_mode_detect(PROFILE_T *profile) {
             err:
                 rtnl_unlock();
             */
+            #endif
             profile->qmap_mode = n/5; //0x11\n0x22\n0x33\n
             if (profile->qmap_mode > 1) {
                 //PDN-X map to qmimux-X
                 if(!profile->muxid) {
-                	profile->muxid = (buf[5*(profile->pdp - 1) + 2] - '0')*16 + (buf[5*(profile->pdp - 1) + 3] - '0');
+                    profile->muxid = (buf[5*(profile->pdp - 1) + 2] - '0')*16 + (buf[5*(profile->pdp - 1) + 3] - '0');
                     snprintf(profile->qmapnet_adapter, sizeof(profile->qmapnet_adapter), "qmimux%d", profile->pdp - 1);
                 } else {
-					profile->muxid = (buf[5*(profile->muxid - 0x81) + 2] - '0')*16 + (buf[5*(profile->muxid - 0x81) + 3] - '0');
+                    profile->muxid = (buf[5*(profile->muxid - 0x81) + 2] - '0')*16 + (buf[5*(profile->muxid - 0x81) + 3] - '0');
                     snprintf(profile->qmapnet_adapter, sizeof(profile->qmapnet_adapter), "qmimux%d", profile->muxid - 0x81);
                 }
             } else if (profile->qmap_mode == 1) {
@@ -334,7 +338,7 @@ static int ql_mbim_usb_vlan_mode_detect(PROFILE_T *profile) {
     if (!access(tmp, F_OK)) {
         profile->qmap_mode = 4;
         profile->muxid = profile->pdp;
-        strncpy(profile->qmapnet_adapter, &tmp[strlen("/sys/class/net/")], sizeof(profile->qmapnet_adapter));
+        no_trunc_strncpy(profile->qmapnet_adapter, tmp + strlen("/sys/class/net/"), sizeof(profile->qmapnet_adapter) - 1);
 
         dbg_time("mbim_qmap_mode = %d, vlan_id = 0x%02x, qmap_netcard = %s",
             profile->qmap_mode, profile->muxid, profile->qmapnet_adapter);
@@ -352,7 +356,7 @@ static int ql_mbim_mhi_qmap_mode_detect(PROFILE_T *profile) {
 
             if (profile->qmap_mode == 1)
                 offset_id = 0;
-            profile->muxid = offset_id;
+            profile->muxid = profile->pdp;
             strcpy(profile->qmapnet_adapter, profile->rmnet_info.ifname[offset_id]);
             profile->qmap_size = profile->rmnet_info.rx_urb_size;
             profile->qmap_version = profile->rmnet_info.qmap_version;
@@ -377,5 +381,22 @@ int ql_qmap_mode_detect(PROFILE_T *profile) {
     } else if (profile->software_interface == SOFTWARE_QMI) {
         return ql_qmi_qmap_mode_detect(profile);
     }
+#ifdef CONFIG_QRTR
+    else if(profile->software_interface == SOFTWARE_QRTR) {
+        char tmp[128];
+
+        profile->qmap_mode = 4;
+        profile->qmap_version = WDA_DL_DATA_AGG_QMAP_V5_ENABLED;
+        profile->qmap_size = 31*1024;
+        profile->muxid = 0x80 | profile->pdp;
+        snprintf(profile->qmapnet_adapter, sizeof(profile->qmapnet_adapter), "rmnet_data%d", profile->muxid&0xF);
+
+        snprintf(tmp, sizeof(tmp), "/sys/class/net/%s", profile->qmapnet_adapter);
+        if (access(tmp, F_OK)) {
+            rtrmnet_ctl_create_vnd(profile->usbnet_adapter, profile->qmapnet_adapter,
+                profile->muxid, profile->qmap_version, 11, 4096);
+        }
+    }
+#endif
     return 0;
 }

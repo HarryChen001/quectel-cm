@@ -9,7 +9,7 @@
   None.
 
   ---------------------------------------------------------------------------
-  Copyright (c) 2016 - 2020 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
+  Copyright (c) 2016 - 2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
   Quectel Wireless Solution Proprietary and Confidential.
   ---------------------------------------------------------------------------
 ******************************************************************************/
@@ -23,7 +23,7 @@
 
 #ifdef CONFIG_QMIWWAN
 static int cdc_wdm_fd = -1;
-static UCHAR qmiclientId[QMUX_TYPE_WDS_ADMIN + 1];
+static UCHAR qmiclientId[QMUX_TYPE_ALL];
 
 static UCHAR GetQCTLTransactionId(void) {
     static int TransactionId = 0;
@@ -181,6 +181,7 @@ static UCHAR QmiWwanGetClientID(UCHAR QMIType) {
                 case QMUX_TYPE_WMS: dbg_time("Get clientWMS = %d", ClientId); break;
                 case QMUX_TYPE_PDS: dbg_time("Get clientPDS = %d", ClientId); break;
                 case QMUX_TYPE_UIM: dbg_time("Get clientUIM = %d", ClientId); break;
+                case QMUX_TYPE_COEX: dbg_time("Get clientCOEX = %d", ClientId); break;
                 case QMUX_TYPE_WDS_ADMIN: dbg_time("Get clientWDA = %d", ClientId);
                 break;
                 default: break;
@@ -246,6 +247,12 @@ static int QmiWwanInit(PROFILE_T *profile) {
     qmiclientId[QMUX_TYPE_NAS] = QmiWwanGetClientID(QMUX_TYPE_NAS);
     qmiclientId[QMUX_TYPE_UIM] = QmiWwanGetClientID(QMUX_TYPE_UIM);
     qmiclientId[QMUX_TYPE_WDS_ADMIN] = QmiWwanGetClientID(QMUX_TYPE_WDS_ADMIN);
+#ifdef CONFIG_COEX_WWAN_STATE
+    qmiclientId[QMUX_TYPE_COEX] = QmiWwanGetClientID(QMUX_TYPE_COEX);
+#endif
+#ifdef CONFIG_ENABLE_QOS
+    qmiclientId[QMUX_TYPE_QOS] = QmiWwanGetClientID(QMUX_TYPE_QOS);
+#endif
     profile->wda_client = qmiclientId[QMUX_TYPE_WDS_ADMIN];
 
     return 0;
@@ -257,8 +264,8 @@ static int QmiWwanDeInit(void) {
     {
         if (qmiclientId[i] != 0)
         {
-                QmiWwanReleaseClientID(i, qmiclientId[i]);
-                qmiclientId[i] = 0;
+            QmiWwanReleaseClientID((QMUX_TYPE_WDS_IPV6 == i ? QMUX_TYPE_WDS : i), qmiclientId[i]);
+            qmiclientId[i] = 0;
         }
     }
 
@@ -321,6 +328,9 @@ static void * QmiWwanThread(void *pData) {
          if (!strncmp(profile->proxy, QUECTEL_QMI_PROXY, strlen(QUECTEL_QMI_PROXY))) {
             snprintf(profile->proxy, sizeof(profile->proxy), "%s%c", QUECTEL_QMI_PROXY, num);
          }
+    }
+    else if (!strncmp(cdc_wdm, "/dev/mhi_IPCR", strlen("/dev/mhi_IPCR"))) {
+        snprintf(profile->proxy, sizeof(profile->proxy), "%s%c", QUECTEL_QRTR_PROXY, num);
     }
     else if (profile->qmap_mode > 1) {
         snprintf(profile->proxy, sizeof(profile->proxy), "%s%c", QUECTEL_QMI_PROXY, num);
@@ -437,5 +447,13 @@ const struct qmi_device_ops qmiwwan_qmidev_ops = {
     .send = QmiWwanSendQMI,
     .read = QmiWwanThread,
 };
+
+uint8_t qmi_over_mbim_get_client_id(uint8_t QMIType) {
+    return QmiWwanGetClientID(QMIType);
+}
+
+uint8_t qmi_over_mbim_release_client_id(uint8_t QMIType, uint8_t ClientId) {
+    return QmiWwanReleaseClientID(QMIType, ClientId);
+}
 #endif
 

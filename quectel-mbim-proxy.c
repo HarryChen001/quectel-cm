@@ -16,9 +16,9 @@
 #include <linux/if.h>
 #include <dirent.h>
 #include <signal.h>
-#include <endian.h>
 #include <inttypes.h>
 #include <getopt.h>
+#include "qendian.h"
 
 #define QUECTEL_MBIM_PROXY "quectel-mbim-proxy"
 #define safe_close(_fd) do { if (_fd > 0) { close(_fd); _fd = -1; } } while(0)
@@ -104,10 +104,10 @@ static int mbim_send_open_msg(int mbim_dev_fd, uint32_t MaxControlTransfer) {
     MBIM_OPEN_MSG_T open_msg;
     MBIM_OPEN_MSG_T *pRequest = &open_msg;
 
-    pRequest->MessageHeader.MessageType = (MBIM_OPEN_MSG);
-    pRequest->MessageHeader.MessageLength = (sizeof(MBIM_OPEN_MSG_T));
-    pRequest->MessageHeader.TransactionId = (1);
-    pRequest->MaxControlTransfer = (MaxControlTransfer);
+    pRequest->MessageHeader.MessageType = htole32(MBIM_OPEN_MSG);
+    pRequest->MessageHeader.MessageLength = htole32(sizeof(MBIM_OPEN_MSG_T));
+    pRequest->MessageHeader.TransactionId = htole32(1);
+    pRequest->MaxControlTransfer = htole32(MaxControlTransfer);
 
     mbim_debug("%s()\n", __func__);
     return non_block_write(mbim_dev_fd, pRequest, sizeof(MBIM_OPEN_MSG_T));
@@ -200,6 +200,7 @@ static int handle_client_request(int mbim_dev_fd, int client_fd, void *pdata, in
     int client_idx = -1;
     int ret;
     MBIM_MESSAGE_HEADER *pRequest = (MBIM_MESSAGE_HEADER *)pdata;
+    unsigned int  TransactionId = le32toh(pRequest->TransactionId);
 
     for (i = 0; i < CM_MAX_CLIENT; i++) {
         if (cm_clients[i].client_fd == client_fd) {
@@ -212,9 +213,21 @@ static int handle_client_request(int mbim_dev_fd, int client_fd, void *pdata, in
         goto error;
     }
 
+    if (le32toh(pRequest->MessageType) == MBIM_OPEN_MSG
+        || le32toh(pRequest->MessageType) == MBIM_CLOSE_MSG) {
+        MBIM_OPEN_DONE_T OpenDone;
+        OpenDone.MessageHeader.MessageType = htole32(le32toh(pRequest->MessageType) | 0x80000000);
+        OpenDone.MessageHeader.MessageLength = htole32(sizeof(OpenDone));
+        OpenDone.MessageHeader.TransactionId = htole32(TransactionId);
+        OpenDone.Status = htole32(0);
+        non_block_write (client_fd, &OpenDone, sizeof(OpenDone));
+        return 0;
+    }
+
     /* transfer TransicationID to proxy transicationID and record in sender list */
-    pRequest->TransactionId = (pRequest->TransactionId & TID_MASK) + (client_idx << TID_SHIFT);
-    if (verbose) mbim_debug("REQ client_fd=%d, client_idx=%d, tid=%u\n", cm_clients[i].client_fd, cm_clients[i].client_idx, (pRequest->TransactionId & TID_MASK));
+    pRequest->TransactionId = htole32(TransactionId | (client_idx << TID_SHIFT));
+    if (verbose) mbim_debug("REQ client_fd=%d, client_idx=%d, tid=%u\n",
+        cm_clients[client_idx].client_fd, cm_clients[client_idx].client_idx, TransactionId);
     ret = non_block_write (mbim_dev_fd, pRequest, len);
     if (ret == len)
         return 0;
@@ -232,9 +245,10 @@ static int handle_device_response(void *pdata, int len)
 {
     int i;
     MBIM_MESSAGE_HEADER *pResponse = (MBIM_MESSAGE_HEADER *)pdata;
+    unsigned int  TransactionId = le32toh(pResponse->TransactionId);
 
     /* unsocial/function error message */
-    if (pResponse->TransactionId == 0) {
+    if (TransactionId == 0) {
         for (i = 0; i < CM_MAX_CLIENT; i++) {
             if (cm_clients[i].client_fd > 0) {
                 non_block_write(cm_clients[i].client_fd, pResponse, len);
@@ -243,19 +257,21 @@ static int handle_device_response(void *pdata, int len)
     }
     else {
         /* try to find the sender */
-        int client_idx = (pResponse->TransactionId >> TID_SHIFT);
+        int client_idx = (TransactionId >> TID_SHIFT);
 
         for (i = 0; i < CM_MAX_CLIENT; i++) {
             if (cm_clients[i].client_idx == client_idx && cm_clients[i].client_fd > 0) {
-                pResponse->TransactionId &= TID_MASK;
-                if (verbose) mbim_debug("RSP client_fd=%d, client_idx=%d, tid=%u\n", cm_clients[i].client_fd, cm_clients[i].client_idx, (pResponse->TransactionId & TID_MASK));
+                TransactionId &= TID_MASK;
+                pResponse->TransactionId = htole32(TransactionId);
+                if (verbose) mbim_debug("RSP client_fd=%d, client_idx=%d, tid=%u\n",
+                    cm_clients[i].client_fd, cm_clients[i].client_idx, TransactionId);
                 non_block_write(cm_clients[i].client_fd, pResponse, len);
                 break;
             }
         }
 
-        if ( i == CM_MAX_CLIENT) {
-           mbim_debug("%s nobody care tid=%u\n", __func__, pResponse->TransactionId);     
+        if (i == CM_MAX_CLIENT) {
+           mbim_debug("%s nobody care tid=%u\n", __func__, TransactionId);     
         }
     }
 
@@ -337,9 +353,9 @@ static int proxy_loop(int mbim_dev_fd)
                         if (mbim_server_fd == -1) {
                             MBIM_OPEN_DONE_T *pOpenDone = (MBIM_OPEN_DONE_T *)cm_recv_buffer;
 
-                            if (pOpenDone->MessageHeader.MessageType == MBIM_OPEN_DONE) {
-                                mbim_debug("receive MBIM_OPEN_DONE, status=%d\n", pOpenDone->Status);
-                                if (pOpenDone->Status)
+                            if (le32toh(pOpenDone->MessageHeader.MessageType) == MBIM_OPEN_DONE) {
+                                mbim_debug("receive MBIM_OPEN_DONE, status=%d\n", htole32(pOpenDone->Status));
+                                if (htole32(pOpenDone->Status))
                                     goto error;
                                 mbim_server_fd = proxy_make_server(QUECTEL_MBIM_PROXY);
                                 mbim_debug("mbim_server_fd=%d\n", mbim_server_fd);

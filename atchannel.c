@@ -44,6 +44,7 @@
 static pthread_t s_tid_reader;
 static int s_fd = -1;    /* fd of the AT channel */
 static ATUnsolHandler s_unsolHandler;
+static int s_atc_proxy = 0;    /* fd of the AT channel */
 
 /* for input buffering */
 
@@ -135,6 +136,7 @@ static const char * s_finalResponsesError[] = {
     "NO CARRIER", /* sometimes! */
     "NO ANSWER",
     "NO DIALTONE",
+    "COMMAND NOT SUPPORT",
 };
 static int isFinalResponseError(const char *line)
 {
@@ -236,9 +238,13 @@ static void processLine(const char *line)
         writeraw(s_raw_data, s_raw_len);
         s_raw_data = NULL;
     } else if (isFinalResponseSuccess(line)) {
+        if(s_atc_proxy)
+            handleUnsolicited(line);
         sp_response->success = 1;
         handleFinalResponse(line);
     } else if (isFinalResponseError(line)) {
+        if(s_atc_proxy) 
+            handleUnsolicited(line);
         sp_response->success = 0;
         handleFinalResponse(line);
     } else if (s_smsPDU != NULL && 0 == strcmp(line, "> ")) {
@@ -425,7 +431,7 @@ static const char *readline()
 
 static void onReaderClosed()
 {
-    LOGE("%s\n", __func__);
+    LOGE("%s", __func__);
     if (s_onReaderClosed != NULL && s_readerClosed == 0) {
 
         pthread_mutex_lock(&cm_command_mutex);
@@ -634,7 +640,7 @@ static void clearPendingCommand()
  * Starts AT handler on stream "fd'
  * returns 0 on success, -1 on error
  */
-int at_open(int fd, ATUnsolHandler h)
+int at_open(int fd, ATUnsolHandler h, int proxy)
 {
     int ret;
     pthread_attr_t attr;
@@ -642,6 +648,7 @@ int at_open(int fd, ATUnsolHandler h)
     s_fd = fd;
     s_unsolHandler = h;
     s_readerClosed = 0;
+	s_atc_proxy = proxy;
 
     s_responsePrefix = NULL;
     s_smsPDU = NULL;
@@ -664,7 +671,7 @@ int at_open(int fd, ATUnsolHandler h)
 /* FIXME is it ok to call this from the reader and the command thread? */
 void at_close()
 {
-    dbg_time("at_close\n");
+    dbg_time("at_close");
     if (s_fd >= 0) {
         close(s_fd);
     }

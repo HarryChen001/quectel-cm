@@ -17,8 +17,10 @@
 
 #include "at_tok.h"
 #include <string.h>
+#include <stdio.h>
 #include <ctype.h>
 #include <stdlib.h>
+#include <stdarg.h>
 
 /**
  * Starts tokenizing an AT response string
@@ -187,86 +189,95 @@ int at_tok_hasmore(char **p_cur)
     return ! (*p_cur == NULL || **p_cur == '\0');
 }
 
-#if 1 //quectel
-/**
- *  Add to skip comma
- *  Wythe 2013-9-27
- */
-int skipComma(char **p_cur)
+int at_tok_count(const char *in_line)
 {
-    if(*p_cur == NULL) return -1;
+    int commas = 0;
+    const char *p;
 
-    while(**p_cur != '\0' && **p_cur != ',')
-    {
-        (*p_cur)++;
+    if (!in_line)
+        return 0;
+
+    for (p = in_line; *p != '\0' ; p++) {
+        if (*p == ',') commas++;
     }
 
-    if(**p_cur == ',')
-    {
-        (*p_cur)++;
-    }
-
-    if(*p_cur == NULL) return -1;
-
-
-    return 0;
+    return commas;
 }
 
-//wythe add on 2014-3-28
-/** return the num of $(*target) char in $(*p_cur) string */
-int at_tok_charcounter(char *p_cur, char *target, int *p_outcount)
+//fmt: d ~ int, x ~ hexint, b ~ bool, s ~ str
+int at_tok_scanf(const char *in_line, const char *fmt, ...)
 {
-    int targetcounter = 0;
-
-    if(p_cur == NULL)
-        return -1;
-    
-    while(*p_cur != '\0')
-    {
-        if( *p_cur == *target)
-            targetcounter++;
-        p_cur++;
-    }
-		*p_outcount=targetcounter;    
-    return 0;
-}
-
-//wythe add on 2014-3-28
-/** return the element value between beginTag and endTag,
- *  also return the new string begin from endTag.(endTag is
- *  not in the new string)
- */
-char* at_tok_getElementValue(const char *p_in, const char *beginTag, const char *endTag, char **remaining)
-{
-    char *ret = NULL;
-    char *start = NULL;
-    char *end = NULL;
     int n = 0;
-    int m = 0;
-    
-    if(p_in == NULL || beginTag == NULL || endTag == NULL)
-        return NULL;
-    
-    start = strstr(p_in, beginTag);
-    if(start != NULL)
-        end = strstr(p_in,endTag);
-    if(end != NULL)
-    {
-        n = strlen(beginTag);
-        m = end - (start+n);
+    int err;
+    va_list ap;
+    const char *p = fmt;
+    void *d;
+    void *dump;
+    static char s_line[1024];
+    char *line = s_line;
 
-        ret = (char *)malloc(m * sizeof(char *));
-        if(ret != NULL)
-        {
-            strncpy(ret, start+n, m);
-            ret[m] = (char)0;
+    if (!in_line)
+        return 0;
+
+    strncpy(s_line, in_line, sizeof(s_line) - 1);
+
+    va_start(ap, fmt);
+
+    err = at_tok_start(&line);
+    if (err < 0) goto error;
+
+    for (; *p; p++) {
+        if (*p == ',' || *p == ' ')
+            continue;
+
+        if (*p != '%') {
+            goto error;
+        }
+        p++;
+
+        d = va_arg(ap, void *);
+        if (!d)
+            d = &dump;
+
+        if (!at_tok_hasmore(&line))
+            break;
+        
+        if (*line == '-' && *(line + 1) == ',') {
+            line += 2;
+            n++;
+            if (*p == 'd')
+                *(int *)d = -1;
+            continue;
+         }
+
+        switch(*p) {
+            case 'd':
+                err = at_tok_nextint(&line, (int *)d);
+                if (err < 0) goto error;
+           break;
+            case 'x':
+                err = at_tok_nexthexint(&line, (int *)d);
+                if (err < 0) goto error;
+            break;
+            case 'b':
+                err = at_tok_nextbool(&line, (char *)d);
+                if (err < 0) goto error;
+            break;
+            case 's':
+                err = at_tok_nextstr(&line, (char **)d); //if strdup(line), here return free memory to caller
+                if (err < 0) goto error;
+            break;
+            default:
+                goto error;
+            break;
         }
 
-        if(remaining != NULL)
-            *remaining = end + strlen(endTag);
+        n++;
     }
 
-    return ret;
-}
-#endif
+    va_end(ap);
 
+error:
+    //free(line);
+    return n;
+}

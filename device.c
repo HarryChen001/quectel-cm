@@ -9,7 +9,7 @@
   None.
 
   ---------------------------------------------------------------------------
-  Copyright (c) 2016 - 2020 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
+  Copyright (c) 2016 - 2023 Quectel Wireless Solution, Co., Ltd.  All Rights Reserved.
   Quectel Wireless Solution Proprietary and Confidential.
   ---------------------------------------------------------------------------
 ******************************************************************************/
@@ -94,7 +94,7 @@ static int dir_get_child(const char *dirname, char *buff, unsigned bufsize, cons
             continue;
         if (prefix && strlen(prefix) && strncmp(entptr->d_name, prefix, strlen(prefix)))
             continue;
-        snprintf(buff, bufsize, "%s", entptr->d_name);
+        snprintf(buff, bufsize, "%.31s", entptr->d_name);
         break;
     }
     closedir(dirptr);
@@ -190,7 +190,7 @@ static void query_usb_interface_info(char *path, struct usb_interface_info *p) {
                 break;
             n--;
         }
-        strncpy(p->driver, &driver[n+1], sizeof(p->driver));
+        strncpy(p->driver, &driver[n+1], sizeof(p->driver) - 1);
     }
 
     path[offset] = '\0';
@@ -340,14 +340,26 @@ BOOL qmidevice_detect(char *qmichannel, char *usbnet_adapter, unsigned bufsize, 
             int atIntf = -1;
 
             if (profile->usb_dev.idVendor == 0x2c7c) { //Quectel
-                if ((profile->usb_dev.idProduct&0xFF00) == 0x0900) //unisoc
+                switch (profile->usb_dev.idProduct) { //EC200U
+                case 0x0901: //EC200U
+                case 0x0904: //EC200G
+                case 0x8101: //RG801H
+                    atIntf = 2;
+                break;
+                case 0x0900: //RG500U
                     atIntf = 4;
-                else if ((profile->usb_dev.idProduct&0xF000) == 0x8000) //hisi
-                    atIntf = 4;
-                else if ((profile->usb_dev.idProduct&0xFF00) == 0x6000) //asr
+                break;
+                case 0x6026: //EC200T
+                case 0x6005: //EC200A
+                case 0x6002: //EC200S
+                case 0x6001: //EC100Y
+                case 0x6007: //EG915Q-NA in ECM mode, it also could set atIntf to 4
                     atIntf = 3;
-                //else if ((profile->usb_dev.idProduct&0xF000) == 0x0000) //mdm
-                //    atIntf = 2;
+                break;
+                default:
+                   dbg_time("unknow at interface for USB idProduct:%04x\n", profile->usb_dev.idProduct);
+                break;
+                }
             }
 
             if (atIntf != -1) {
@@ -385,22 +397,98 @@ error:
 }
 
 int mhidevice_detect(char *qmichannel, char *usbnet_adapter, PROFILE_T *profile) {
-    if (!access("/sys/class/net/pcie_mhi0", F_OK))
-        strcpy(usbnet_adapter, "pcie_mhi0");
-    else if (!access("/sys/class/net/rmnet_mhi0", F_OK))
-        strcpy(usbnet_adapter, "rmnet_mhi0");
-    else {
-        dbg_time("qmidevice_detect failed");
+    struct dirent* ent = NULL;
+    DIR *pDir;
+    const char *rootdir_mhi[] = {"/sys/bus/mhi_q/devices", "/sys/bus/mhi/devices", NULL};
+    int i = 0;
+    char path[256];
+    int find = 0;
+
+    while (rootdir_mhi[i]) {
+        const char *rootdir = rootdir_mhi[i++];
+
+        pDir = opendir(rootdir);
+        if (!pDir) {
+            if (errno != ENOENT)
+                    dbg_time("opendir %s failed: %s", rootdir, strerror(errno));
+            continue;
+        }
+
+        while ((ent = readdir(pDir)) != NULL)  {
+            char netcard[32] = {'\0'};
+            char devname[32] = {'\0'};
+            int software_interface = SOFTWARE_QMI;
+            char *pNode = NULL;
+
+            pNode = strstr(ent->d_name, "_IP_HW0"); //0306_00.01.00_IP_HW0
+            if (!pNode)
+                continue;
+
+            snprintf(path, sizeof(path), "%s/%.32s/net", rootdir, ent->d_name);
+            dir_get_child(path, netcard, sizeof(netcard), NULL);
+            if (!netcard[0])
+                continue;
+
+            if (usbnet_adapter[0] && strcmp(netcard, usbnet_adapter)) //not '-i x'
+                continue;
+
+            if (!strcmp(rootdir, "/sys/bus/mhi/devices")) {
+                snprintf(path, sizeof(path), "%s/%.13s_IPCR", rootdir, ent->d_name); // 13 is sizeof(0306_00.01.00)
+                if (!access(path, F_OK)) {
+                    /* we also need 'cat /dev/mhi_0306_00.01.00_pipe_14' to enable rmnet as like USB's DTR 
+                         or will get error 'requestSetEthMode QMUXResult = 0x1, QMUXError = 0x46' */
+                    sprintf(usbnet_adapter, "%s", netcard);
+                    sprintf(qmichannel, "qrtr-%d", 3); // 3 is sdx modem's node id
+                    profile->software_interface = SOFTWARE_QRTR;
+                    find = 1;
+                    break;
+                }
+                continue;
+            }
+
+            snprintf(path, sizeof(path), "%s/%.13s_IPCR", rootdir, ent->d_name);
+            if (access(path, F_OK)) {
+                snprintf(path, sizeof(path), "%s/%.13s_QMI0", rootdir, ent->d_name);
+                if (access(path, F_OK)) {
+                    snprintf(path, sizeof(path), "%s/%.13s_MBIM", rootdir, ent->d_name);
+                    if (!access(path, F_OK))
+                        software_interface = SOFTWARE_MBIM;
+                }
+            }
+            if (access(path, F_OK))
+                continue;
+
+            strncat(path, "/mhi_uci_q", sizeof(path)-1);
+            dir_get_child(path, devname, sizeof(devname), NULL);
+            if (!devname[0])
+                continue;      
+
+            sprintf(usbnet_adapter, "%s", netcard);
+            sprintf(qmichannel, "/dev/%s", devname);
+            profile->software_interface = software_interface;
+            find = 1;
+            break;
+        }
+
+        closedir(pDir);
+    }
+
+    return find;
+}
+
+int atdevice_detect(char *atchannel, char *usbnet_adapter, PROFILE_T *profile) {
+    if (!access("/sys/class/net/sipa_dummy0", F_OK)) {
+		strcpy(usbnet_adapter, "sipa_dummy0");
+		snprintf(profile->qmapnet_adapter, sizeof(profile->qmapnet_adapter), "%s%d", "pcie", profile->pdp - 1);
+    }
+	else {
+        dbg_time("atdevice_detect failed");
         goto error;
     }
 
-    if (!access("/dev/mhi_MBIM", F_OK)) {
-        strcpy(qmichannel, "/dev/mhi_MBIM");
-        profile->software_interface = SOFTWARE_MBIM;
-    }
-    else if (!access("/dev/mhi_QMI0", F_OK)) {
-        strcpy(qmichannel, "/dev/mhi_QMI0");
-        profile->software_interface = SOFTWARE_QMI;
+    if (!access("/dev/stty_nr31", F_OK)) {
+        strcpy(atchannel, "/dev/stty_nr31");
+        profile->software_interface = SOFTWARE_ECM_RNDIS_NCM;
     }
     else {
         goto error;
@@ -410,6 +498,7 @@ int mhidevice_detect(char *qmichannel, char *usbnet_adapter, PROFILE_T *profile)
 error:
     return 0;
 }
+
 
 int get_driver_type(PROFILE_T *profile)
 {
@@ -509,7 +598,7 @@ int reattach_driver(PROFILE_T *profile)
     }
     usbfs_detach_kernel_driver(fd, ifnum);
     usbfs_attach_kernel_driver(fd, ifnum);
-	close(fd);
+    close(fd);
     return 0;
 }
 
@@ -534,14 +623,47 @@ int ql_get_netcard_driver_info(const char *devname)
 
     if (ioctl(fd, SIOCETHTOOL, &ifr) < 0) {
         dbg_time("ioctl() error: errno(%d)(%s)", errno, strerror(errno));
+        close(fd);
         return -1;
     }
 
     dbg_time("netcard driver = %s, driver version = %s", drvinfo.driver, drvinfo.version);
 
-	close(fd);
+    close(fd);
 
     return 0;
+}
+
+int ql_get_netcard_carrier_state(const char *devname)
+{
+    int fd = -1;
+    struct ethtool_value edata;
+    struct ifreq ifr;	/* ifreq suitable for ethtool ioctl */
+
+    memset(&ifr, 0, sizeof(ifr));
+    strcpy(ifr.ifr_name, devname);
+
+    fd = socket(AF_INET, SOCK_DGRAM, 0);
+    if (fd < 0) {
+        dbg_time("Cannot get control socket: errno(%d)(%s)", errno, strerror(errno));
+        return -1;
+    }
+
+    edata.cmd = ETHTOOL_GLINK;
+    edata.data = 0;
+    ifr.ifr_data = (void *)&edata;
+
+    if (ioctl(fd, SIOCETHTOOL, &ifr) < 0) {
+        dbg_time("ioctl('%s') error: errno(%d)(%s)", devname, errno, strerror(errno));
+        return -1;
+    }
+
+    if (!edata.data)
+        dbg_time("netcard carrier = %d", edata.data);
+
+    close(fd);
+
+    return edata.data;
 }
 
 static void *catch_log(void *arg)
