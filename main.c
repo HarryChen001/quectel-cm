@@ -51,9 +51,9 @@ static void usbnet_link_change(int link, PROFILE_T *profile) {
         memset(&profile->ipv6, 0, sizeof(IPV6_T));
 
     if (link) {
-        udhcpc_start(profile);
+//        udhcpc_start(profile);
     } else {
-        udhcpc_stop(profile);
+//        udhcpc_stop(profile);
     }
 }
 
