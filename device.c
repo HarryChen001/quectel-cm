@@ -347,6 +347,7 @@ BOOL qmidevice_detect(char *qmichannel, char *usbnet_adapter, unsigned bufsize, 
                     atIntf = 2;
                 break;
                 case 0x0900: //RG500U
+		case 0x0903: //EC600
                     atIntf = 4;
                 break;
                 case 0x6026: //EC200T
